@@ -1,0 +1,105 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alloy-postgres-secret
+type: Opaque
+data:
+  username: YWxsb3lkYmFkbWlu
+  password: cGFzc3dvcmQ=
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgpool
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pgpool
+  template:
+    metadata:
+      labels:
+        app: pgpool
+    spec:
+      containers:
+      - name: pgpool
+        image: pgpool/pgpool
+        env:
+        - name: alloydbadmin_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: alloy-postgres-secret
+              key: username
+        - name: alloydbadmin_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: alloy-postgres-secret
+              key: password
+        - name: PGPOOL_PASSWORD_ENCRYPTION_METHOD
+          value: "md5"
+        - name: PGPOOL_ENABLE_POOL_PASSWD
+          value: "true"
+        - name: PGPOOL_SKIP_PASSWORD_ENCRYPTION
+          value: "false"
+        - name: PGPOOL_PCP_USER
+          valueFrom:
+            secretKeyRef:
+              name: alloy-postgres-secret
+              key: username
+        - name: PGPOOL_PCP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: alloy-postgres-secret
+              key: password
+        volumeMounts:
+        - name: pgpool-config
+          mountPath: /config
+        - name: pgpool-failover
+          mountPath: /failover-scripts
+        #- name: pgpool-tls
+        #  mountPath: /config/tls
+      volumes:
+      - name: pgpool-config
+        configMap:
+          name: pgpool-config
+      - name: pgpool-failover
+        configMap:
+          name: pgpool-failover
+          defaultMode: 0755
+      # Configure your own TLS certificate.
+      # If not set, Pgpool-II will automatically generate the TLS certificate if ssl = on.
+      #- name: pgpool-tls
+      #  secret:
+      #    secretName: pgpool-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pgpool
+spec:
+  selector:
+    app: pgpool
+  ports:
+  - name: pgpool-port
+    protocol: TCP
+    port: 9999
+    targetPort: 9999
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pgpool-ingress
+  annotations:
+    networking.gke.io/load-balancer-type: "Internal"
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Cluster
+  selector:
+    app: pgpool
+  ports:
+  - name: pgpool-port
+    port: 9999
+    protocol: TCP
+    targetPort: 9999
+  loadBalancerSourceRanges:
+  - 10.0.0.0/4

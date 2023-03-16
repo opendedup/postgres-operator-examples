@@ -1,0 +1,71 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: dbstorage
+provisioner: kubernetes.io/gce-pd
+volumeBindingMode: Immediate
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+parameters:
+  type: pd-ssd
+  fstype: ext4
+  replication-type: none
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: alloydb
+spec:
+  selector:
+    matchLabels:
+      app: alloydb # has to match .spec.template.metadata.labels
+  serviceName: "alloydb"
+  replicas: 1 # by default is 1
+  minReadySeconds: 10 # by default is 0
+  template:
+    metadata:
+      labels:
+        app: alloydb # has to match .spec.selector.matchLabels
+    spec:
+      securityContext:
+        runAsUser: 2345
+        fsGroup: 2345
+        fsGroupChangePolicy: "Always"
+      terminationGracePeriodSeconds: 10
+      containers:
+      - name: alloydb
+        image: us-central1-docker.pkg.dev/spanner-repltest/alloydb/pgservice:latest
+        #command: ["/bin/bash","-c"]
+        #args: ["sleep 10000"]
+        command: ["/bin/bash"]
+        args: ["/ksmurf-scripts/alloydb_init.sh"]
+        env:
+        - name: PGPASSWORD
+          value: password
+        ports:
+        - containerPort: 5432
+          name: postgres
+        volumeMounts:
+        - name: dbdata
+          mountPath: /mnt/disks/pgsql
+        - name: alloydbconfig
+          mountPath: /conf
+        - name: alloydbscripts
+          mountPath: /ksmurf-scripts
+      volumes:
+        - name: alloydbconfig
+          configMap:
+            name: alloydbconfig
+        - name: alloydbscripts
+          configMap:
+            name: alloydbscripts
+            defaultMode: 0777
+  volumeClaimTemplates:
+  - metadata:
+      name: dbdata
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "dbstorage"
+      resources:
+        requests:
+          storage: 100Gi

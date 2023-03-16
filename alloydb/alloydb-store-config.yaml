@@ -1,0 +1,300 @@
+apiVersion: v1
+data:
+  dataplane.conf: |-
+    # Configuration file for AlloyDB Omni
+
+    DATADISK_PATH="/dev/disk/by-id/google-alloydb-data"
+    PG_IMAGE="gcr.io/alloydb-omni/pg-service:latest"
+    MA_IMAGE="gcr.io/alloydb-omni/memory-agent:latest"
+  postgresql.conf: |-
+    # Reference postgres configuration
+    # TODO(gbadamassi) Work with the Kernel team to devise a reference config for AlloyDB Omni
+    primary_conninfo = 'user=alloydbadmin host=alloydb-cloud port=5432 password=password'
+    primary_slot_name = 'standby1'
+    recovery_target_timeline = 'latest'
+    max_prepared_transactions=0
+    log_timezone='UTC'
+    hot_standby=on
+    lc_time='en_US.UTF8'
+    archive_mode=on
+    max_locks_per_transaction=64
+    datestyle='iso, mdy'
+    wal_init_zero=off
+    wal_keep_size=100GB
+    checkpoint_completion_target=0.9
+    max_wal_senders=50
+    bgwriter_lru_maxpages=200
+    max_replication_slots=50
+    shared_buffers_active_ratio=0.65
+    max_wal_size=1504MB
+    shared_preload_libraries='g_stats,google_columnar_engine,google_db_advisor,google_job_scheduler,pg_stat_statements'
+    log_rotation_size=0
+    log_temp_files=0
+    google_insights.enabled=on
+    max_worker_processes=64
+    default_text_search_config='pg_catalog.english'
+    lc_messages='en_US.UTF8'
+    lc_monetary='en_US.UTF8'
+    log_filename='postgres'
+    bgwriter_delay=50
+    timezone='UTC'
+    log_autovacuum_min_duration=0
+    shared_buffers=4096MB
+    huge_pages=off
+    log_directory='log'
+    synchronous_commit=on
+    lc_numeric='en_US.UTF8'
+    wal_level = replica
+    wal_log_hints = on
+
+    archive_timeout=300
+    log_line_prefix='%m [%p]: [%l-1] db=%d,user=%u '
+    log_rotation_age=0
+    max_connections=12
+    superuser_reserved_connections=10
+    archive_command='/bin/true'
+    dynamic_shared_memory_type=posix
+    hot_standby_feedback=on
+    max_slot_wal_keep_size=800GB
+  pg_hba.conf: |-
+    # IPv4 local connections:
+    host    all             all             127.0.0.1/32            trust
+    # IPv6 local connections:
+    host    all             all             ::1/128                 trust
+    # Allow replication connections from localhost, by a user with the
+    # replication privilege.
+    host    replication     all             127.0.0.1/32            trust
+    host    replication     all             ::1/128                 trust
+    host    replication     alloydbadmin             0.0.0.0/0                     md5
+    host    all     all             all                     md5
+kind: ConfigMap
+metadata:
+  name: alloydbconfig
+---
+apiVersion: v1
+data:
+  alloydb_init.sh: |-
+    #!/bin/bash
+
+    # This script initializes the Database container of AlloyDB on-prem (SMURF).
+
+    set -ex
+
+    shopt -s nullglob
+
+    DATAPLANE_CONF_FILE=/conf/dataplane.conf
+    # Set dataplane environment variables
+    while ! [[ -s ${DATAPLANE_CONF_FILE} ]]; do
+      echo "${DATAPLANE_CONF_FILE} is empty at $(date). Retrying after 1s"
+      sleep 1
+    done
+    echo "${DATAPLANE_CONF_FILE} is not-empty at $(date). Proceeding."
+    cat ${DATAPLANE_CONF_FILE}
+    source ${DATAPLANE_CONF_FILE}
+
+    DATADISK_MOUNTPOINT=/mnt/disks/pgsql
+    # The marker file indicating a successful run of post start up script is
+    # intentionally persisted on the data disk to keep it agnostic to instance recreates/failovers.
+    MARKER_FILE_FOR_POST_STARTUP_SCRIPT=${DATADISK_MOUNTPOINT}/post_startup_success
+
+    DATADIR="${DATADISK_MOUNTPOINT}/data"
+    LOGDIR=${DATADIR}/log
+
+    if [[ ! -d "${DATADIR}" ]]; then
+      echo "This is the first time running init...for AlloyDB..., proceeding to initdb."
+      # InitDB
+      /bin/initdb -D "${DATADIR}" -U alloydbadmin --encoding UTF8 --locale C.UTF-8 --auth-host trust --auth-local reject
+      mkdir -p ${LOGDIR}
+
+      # Flush all file system buffers to disk
+      echo "Performing filesystem sync"
+      /bin/sync
+    fi
+    echo "Successfully completed postgres initialization at $(date)"
+
+    # TODO(gbadamassi): Consider moving the post_startup script under a standalone systemctl service.
+    echo "Triggering the post-startup script asynchronously"
+    bash /ksmurf-scripts/alloydb_post_startup.sh ${MARKER_FILE_FOR_POST_STARTUP_SCRIPT} &
+
+    echo "Copying flag fragments..."
+    #cp -a -f ${SHARE_PG_CONF_D} ${DATADIR} #TODO revisit whether we want to copy additional conf files
+    cp -f /conf/pg_hba.conf ${DATADIR}
+    cp -f /conf/postgresql.conf ${DATADIR}
+    # Update WAL level to recover from incorrectly-restored volumes #TODO(gbadamassi) Is WAL recovery necessary for smurf?
+    LD_LIBRARY_PATH=/lib /utils/pg_control_editor --enforce_kernel_ipv6_support=false --pg_data_dir=${DATADIR}
+    # Start postgres
+    echo "Starting postgres!"
+    exec bash /ksmurf-scripts/alloydb_start_postgres.sh
+  alloydb_post_startup.sh: |-
+    #!/bin/bash
+    set -ex
+    source "$(dirname "$0")/alloydb_util.sh"
+    MARKER_FILE_FOR_POST_STARTUP_SCRIPT="$1"
+    # Wait for ~ 30 minutes for postgres database to come up.
+    ATTEMPT=1
+    MAX_ATTEMPTS=1800
+    while [[ $ATTEMPT -le $MAX_ATTEMPTS ]]
+    do
+      set +e
+      # Don't exit if this returns non-zero exit code
+      psql -U alloydbadmin -h 127.0.0.1 -d postgres --command="SELECT 1;"
+      exitcode=$?
+      set -e
+      if [[ $exitcode -eq 0 ]]; then
+        break
+      fi
+      if [[ $ATTEMPT -eq $MAX_ATTEMPTS ]]; then
+        echo "Postgres server is not up after $ATTEMPT connection attempts. Exiting"
+        exit 1
+      fi
+      echo "Postgres server not up. Sleeping for 1 second. Connection attempt $ATTEMPT/$MAX_ATTEMPTS"
+      sleep 1
+      ATTEMPT=$(( $ATTEMPT + 1 ))
+    done
+
+    echo "Postgres server is up, proceeding to create predefined AlloyDB users and databases."
+
+    alloydb::create_db_if_not_exists "CREATE DATABASE alloydbadmin;" postgres
+
+    # Make sure to change alloydbinternaluser() from
+    # src/backend/utils/misc/superuser.c whenever adding new users here.
+    alloydb::create_if_not_exists "CREATE USER alloydbsuperuser CREATEDB CREATEROLE INHERIT;" alloydbadmin
+    # We create the `<username>_table` in alloydbadmin db so that customers cannot drop
+    # these users (as they cannot drop these tables owned by these users).
+    alloydb::create_if_not_exists "CREATE USER alloydbagent CREATEDB CREATEROLE INHERIT IN ROLE alloydbsuperuser;" alloydbadmin
+    alloydb::create_if_not_exists "CREATE USER alloydbimportexport CREATEDB CREATEROLE INHERIT IN ROLE alloydbsuperuser;" alloydbadmin
+    alloydb::create_if_not_exists "CREATE USER alloydbreplica INHERIT REPLICATION;" alloydbadmin
+
+    # The following createuser for `postgres` races with the config-agent
+    # applying initial credentials. Do not fail the script execution, if
+    # the `postgres` user gets created first by the `config-agent`.
+    # See go/lux-cluster-creation-passwords for details.
+    alloydb::create_if_not_exists "CREATE ROLE postgres CREATEDB CREATEROLE INHERIT LOGIN IN ROLE alloydbsuperuser;" alloydbadmin
+
+    # TODO(gbadamassi) Create testuser for integration tests
+
+    /bin/psql -U alloydbadmin -h 127.0.0.1 -c "CREATE TABLE IF NOT EXISTS alloydbsuperuser_table(); ALTER TABLE alloydbsuperuser_table OWNER TO alloydbsuperuser;" alloydbadmin
+    /bin/psql -U alloydbadmin -h 127.0.0.1 -c "CREATE TABLE IF NOT EXISTS alloydbagent_table(); ALTER TABLE alloydbagent_table OWNER TO alloydbagent;" alloydbadmin
+    /bin/psql -U alloydbadmin -h 127.0.0.1 -c "CREATE TABLE IF NOT EXISTS alloydbreplica_table(); ALTER TABLE alloydbreplica_table OWNER TO alloydbreplica;" alloydbadmin
+    /bin/psql -U alloydbadmin -h 127.0.0.1 -c "CREATE TABLE IF NOT EXISTS alloydbimportexport_table(); ALTER TABLE alloydbimportexport_table OWNER TO alloydbimportexport;" alloydbadmin
+
+    /bin/psql -U alloydbadmin -h 127.0.0.1 -c "ALTER DATABASE postgres OWNER TO alloydbsuperuser;" alloydbadmin
+    /bin/psql -U alloydbadmin -h 127.0.0.1 -c "ALTER DATABASE template1 OWNER TO alloydbsuperuser;" alloydbadmin
+
+    # By default the public schema is owned by alloydbadmin and hence customers
+    # cannot drop it. This gives customers more flexibility with the public
+    # schema of all databases
+    /bin/psql -U alloydbadmin -h 127.0.0.1 -c "ALTER SCHEMA public OWNER TO alloydbsuperuser;" postgres
+    /bin/psql -U alloydbadmin -h 127.0.0.1 -c "ALTER SCHEMA public OWNER TO alloydbsuperuser;" template1
+
+    # Grant all default monitoring roles (pg_read_all_settings, pg_read_all_stats
+    # pg_stat_scan_tables) to alloydbsuperuser
+    /bin/psql -U alloydbadmin -h 127.0.0.1 -c "GRANT pg_monitor TO alloydbsuperuser;" postgres
+
+    # Grant invocation access to pg_replication_* functions to alloydbsuperuser.
+    for db in postgres template1
+    do
+      cat << EOF | /bin/psql -U alloydbadmin -h 127.0.0.1 -d $db
+    GRANT EXECUTE ON FUNCTION pg_replication_origin_advance(text, pg_lsn) TO alloydbsuperuser;
+    GRANT EXECUTE ON FUNCTION pg_replication_origin_create(text) TO alloydbsuperuser;
+    GRANT EXECUTE ON FUNCTION pg_replication_origin_drop(text) TO alloydbsuperuser;
+    GRANT EXECUTE ON FUNCTION pg_replication_origin_oid(text) TO alloydbsuperuser;
+    GRANT EXECUTE ON FUNCTION pg_replication_origin_progress(text, boolean) TO alloydbsuperuser;
+    GRANT EXECUTE ON FUNCTION pg_replication_origin_session_is_setup() TO alloydbsuperuser;
+    GRANT EXECUTE ON FUNCTION pg_replication_origin_session_progress(boolean) TO alloydbsuperuser;
+    GRANT EXECUTE ON FUNCTION pg_replication_origin_session_reset() TO alloydbsuperuser;
+    GRANT EXECUTE ON FUNCTION pg_replication_origin_session_setup(text) TO alloydbsuperuser;
+    GRANT EXECUTE ON FUNCTION pg_replication_origin_xact_reset() TO alloydbsuperuser;
+    GRANT EXECUTE ON FUNCTION pg_replication_origin_xact_setup(pg_lsn, timestamp with time zone) TO alloydbsuperuser;
+    GRANT EXECUTE ON FUNCTION pg_show_replication_origin_status() TO alloydbsuperuser;
+    EOF
+    done
+    #Create new database and tables
+    echo "SELECT 'CREATE DATABASE clusterdb' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'mydb')\gexec" | psql -h localhost -U alloydbadmin
+    psql -d clusterdb -h localhost -U alloydbadmin -c "CREATE TABLE IF NOT EXISTS test_table(x integer)"
+    psql -d clusterdb -h localhost -U alloydbadmin -c "INSERT INTO test_table(x) SELECT y FROM generate_series(1, 100) a(y)"
+    #Enable Replication Slot
+    /bin/psql -h localhost -U alloydbadmin -c "SELECT * FROM pg_create_physical_replication_slot('pg_slot_0');"
+
+    #Set Password
+    /bin/psql -h localhost -U alloydbadmin -c "ALTER USER alloydbadmin PASSWORD 'password'"
+
+    # Install pgsnap related extensions under alloydbadmin and hence customers cannot access it
+    # NOTE: Please remove the install here if the operation agent reinstalls the extension.
+    alloydb::create_if_not_exists "CREATE EXTENSION IF NOT EXISTS g_memory CASCADE;" alloydbadmin
+    alloydb::create_if_not_exists "CREATE EXTENSION IF NOT EXISTS google_job_scheduler CASCADE;" alloydbadmin #TODO(gbadamassi) determine if this extension is needed
+
+    echo "Successfully executed post startup script!"
+    touch "${MARKER_FILE_FOR_POST_STARTUP_SCRIPT:?marker file not defined}"
+
+  alloydb_start_postgres.sh: |-
+    #!/bin/bash
+    set -ex
+    DATADISK_MOUNTPOINT=/mnt/disks/pgsql
+    ROOT=${DATADISK_MOUNTPOINT}
+    DATADIR=${DATADISK_MOUNTPOINT}/data
+    LOGDIR=${DATADIR}/log
+    mkdir -p ${LOGDIR}
+    ARCHIVEDIR=${DATADIR}/pg_wal_archive
+    rm -rf ${ARCHIVEDIR}
+
+    # Remove old temp
+    PGTMP=${DATADIR}/base/pgsql_tmp
+    rm -rf "${PGTMP}"
+
+    chmod -R 750 /mnt/disks/pgsql/data/
+
+    echo "Starting Postgres..."
+    exec env /bin/postgres -D ${ROOT}/data -p 5432 -k ${ROOT} -h \*
+  alloydb_util.sh: |-
+    #!/bin/bash
+
+    # Executes the provided Postgres query to create a database, ignoring the returned error
+    # if it already exists. Arguments are:
+    #  - The Postgres query to execute.
+    #  - The maintenance database to connect to execute the query.
+    function alloydb::create_db_if_not_exists() {(
+      # Since we want to catch error statuses returned by psql command,
+      # we unset the -e option (scoped to this function).
+      set +e
+      res=$(/bin/psql -U alloydbadmin -h 127.0.0.1 -c "$1" "$2" 2>&1)
+      status=$?
+      ignore_regex="database.*already exists"
+      if [[ $status -eq 0 ]]; then
+        # The query successfully executed
+        return 0
+      elif [[ $res =~ $ignore_regex ]]; then
+        echo "ignoring the error: $res"
+        return 0
+      else
+        echo "failed to execute \"$1\": ${res}" 1>&2
+        return 1
+      fi
+    )}
+
+    # Executes the provided Postgres query to create, ignoring the returned error
+    # if it already exists. Arguments are:
+    #  - The Postgres query to execute.
+    #  - The database to connect to execute the query.
+    function alloydb::create_if_not_exists() {(
+      # Since we want to catch error statuses returned by psql command,
+      # we unset the -e option (scoped to this function).
+      set +e
+      res=$(/bin/psql -U alloydbadmin -h 127.0.0.1 -c "$1" "$2"  2>&1)
+      status=$?
+      ignore_regex=".*already exists"
+      if [[ $status -eq 0 ]]; then
+        # The query successfully executed
+        return 0
+      elif [[ $res =~ $ignore_regex ]]; then
+        echo "ignoring the error: $res"
+        return 0
+      else
+        echo "failed to execute \"$1\": ${res}" 1>&2
+        return 1
+      fi
+    )}
+    
+kind: ConfigMap
+metadata:
+  name: alloydbscripts
