@@ -1,0 +1,5 @@
+https://www.scalingpostgres.com/tutorials/postgresql-replication-failback-pg-rewind/
+https://github.com/CrunchyData/crunchy-containers/blob/master/build/postgres/Dockerfile
+https://www.dbi-services.com/blog/postgresql-12-setting-up-streaming-replication/
+https://www.highgo.ca/2019/11/07/streaming-replication-setup-in-pg12-how-to-do-it-right/
+https://www.sqlpac.com/en/documents/postgresql-switch-failover-failback-standby-databases.html
