@@ -10,7 +10,7 @@ data:
     # Reference postgres configuration
     # TODO(gbadamassi) Work with the Kernel team to devise a reference config for AlloyDB Omni
     primary_conninfo = 'user=alloydbadmin host=alloydb-cloud port=5432 password=password'
-    primary_slot_name = 'standby1'
+    primary_slot_name = 'pg_slot_0'
     recovery_target_timeline = 'latest'
     max_prepared_transactions=0
     log_timezone='UTC'

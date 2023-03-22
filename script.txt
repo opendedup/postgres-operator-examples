@@ -1,10 +1,30 @@
+kubectl config use-context  gke_spanner-repltest_us-central1-c_store0
+kubectl delete -f alloydb/alloydb-store-sec-services.yaml -n pgsql
+kubectl apply -f alloydb/alloydb-store-services.yaml -n pgsql
+kubectl apply -f alloydb/alloydb-store-config.yaml -n pgsql
+
+kubectl apply -f alloydb/alloydb-store-deploy.yaml -n pgsql
+kubectl get po -n pgsql
+kubectl exec -it alloydb-0 -n pgsql -- bash
+psql -U alloydbadmin -h localhost
+kubectl apply  -f alloydb/alloydb-store-keycloak.yaml -n pgsql
+kubectl get po -n pgsql
+kubectl port-forward mongo-75f59d57f4-4nd6q :8080
+kubectl get po -n pgsql
+
 kubectl config get-contexts
 kubectl config use-context gke_spanner-repltest_us-central1-f_cloudgke
 kubectl apply -f alloydb/alloydb-cloud-deploy.yaml  -n store0
-psql -U alloydbadmin -h 10.128.0.61
+kubectl get po -n store0
+kubectl exec -it alloydb-0 -n store0 -- bash
+psql -U alloydbadmin -h localhost
 \c clusterdb
 \dt
+select * from user_entity;
 #add another user
+select * from user_entity;
+
+### Failover
 kubectl config use-context gke_spanner-repltest_us-central1-c_store0
 kubectl scale statefulsets alloydb --replicas=0 -n pgsql
 #refresh web page

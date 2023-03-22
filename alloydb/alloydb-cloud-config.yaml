@@ -9,7 +9,7 @@ data:
   postgresql.conf: |-
     # Reference postgres configuration
     # TODO(gbadamassi) Work with the Kernel team to devise a reference config for AlloyDB Omni
-    primary_conninfo = 'host=alloydb-store port=5432 user=alloydbadmin password=password'
+    #primary_conninfo = 'host=alloydb-store port=5432 user=alloydbadmin password=password'
     primary_slot_name = 'pg_slot_0'   
     max_prepared_transactions=0
     log_timezone='UTC'
@@ -53,7 +53,6 @@ data:
     dynamic_shared_memory_type=posix
     hot_standby_feedback=on
     max_slot_wal_keep_size=800GB
-    primary_slot_name = pg_slot_0
   pg_hba.conf: |-
     # IPv4 local connections:
     host    all             all             127.0.0.1/32            trust
