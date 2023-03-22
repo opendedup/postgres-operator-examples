@@ -32,7 +32,7 @@ kubectl apply -f alloydb/alloydb-store-sec-services.yaml -n pgsql
 kubectl config use-context gke_spanner-repltest_us-central1-f_cloudgke
 kubectl exec -it alloydb-0 -n store0 -- bash
 pg_ctl promote -D /mnt/disks/pgsql/data/
-psql -U alloydbadmin -h localhost -C select * "from pg_create_physical_replication_slot('standby1',true);"
+psql -U alloydbadmin -h localhost -C select * "from pg_create_physical_replication_slot('pg_slot_0',true);"
 # add another user
 kubectl config use-context gke_spanner-repltest_us-central1-c_store0
 kubectl exec -it alloydb-0 -n pgsql -- bash
